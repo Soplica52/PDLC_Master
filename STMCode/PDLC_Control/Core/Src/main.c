@@ -73,7 +73,7 @@ volatile float target_led_brightness = 0.0f;
 float last_led_brightness = -1.0f;
 
 // --- MASTER PI CONTROLLER VARIABLES (FOIL + LED) ---
-volatile float target_lux = 700.0f;
+volatile float target_lux = 300.0f;
 float Kp_master = 0.05f;  // Reacts gently to sudden shadows.
 float Ki_master = 0.005f; // Builds up very slowly over time.
 float master_integral = 0.0f;

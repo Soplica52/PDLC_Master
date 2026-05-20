@@ -2,6 +2,7 @@ import sys
 import json
 import time
 import csv
+import os
 from datetime import datetime
 from collections import deque
 
@@ -10,7 +11,7 @@ import serial.tools.list_ports
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QComboBox, QPushButton, QLabel, 
                              QSlider, QSpinBox, QGroupBox, QMessageBox, QGridLayout,
-                             QRadioButton, QButtonGroup)
+                             QRadioButton, QButtonGroup, QFileDialog, QTextEdit)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 
@@ -20,6 +21,7 @@ import pyqtgraph as pg
 class SerialWorker(QThread):
     data_received = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
+    debug_message = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -48,6 +50,7 @@ class SerialWorker(QThread):
     def send_line(self, command):
         if self.serial_port.is_open:
             try:
+                self.debug_message.emit(f"TX -> {command.strip()}")
                 self.serial_port.write(command.encode('utf-8'))
             except Exception as e:
                 self.error_occurred.emit(f"Write error: {e}")
@@ -62,6 +65,7 @@ class SerialWorker(QThread):
                     # Your original working readline logic
                     line = self.serial_port.readline().decode('utf-8').strip()
                     if line:
+                        self.debug_message.emit(f"RX <- {line.strip()}")
                         data = json.loads(line)
                         self.data_received.emit(data)
                 else:
@@ -102,6 +106,7 @@ class MainWindow(QMainWindow):
         self.worker = SerialWorker()
         self.worker.data_received.connect(self.update_data)
         self.worker.error_occurred.connect(self.show_error)
+        self.worker.debug_message.connect(self.log_debug)
 
         self.refresh_ports()
 
@@ -188,8 +193,11 @@ class MainWindow(QMainWindow):
         self.log_btn.setCheckable(True)
         self.log_btn.toggled.connect(self.toggle_logging)
         self.lbl_log_status = QLabel("Status: Not Recording")
+        self.btn_export_csv = QPushButton("Export Graph Data to CSV")
+        self.btn_export_csv.clicked.connect(self.export_current_data)
         meas_log_layout.addWidget(self.log_btn)
         meas_log_layout.addWidget(self.lbl_log_status)
+        meas_log_layout.addWidget(self.btn_export_csv)
         
         meas_log_group.setLayout(meas_log_layout)
         bottom_layout.addWidget(meas_log_group, stretch=1)
@@ -246,10 +254,27 @@ class MainWindow(QMainWindow):
         manual_layout.addWidget(self.btn_foil)
         control_layout.addLayout(manual_layout)
 
+        self.btn_sync = QPushButton("Sync Settings to STM32")
+        self.btn_sync.setStyleSheet("background-color: #9C27B0; color: white;")
+        self.btn_sync.clicked.connect(self.sync_settings)
+        control_layout.addWidget(self.btn_sync)
+
         control_group.setLayout(control_layout)
         bottom_layout.addWidget(control_group, stretch=2)
 
         main_layout.addLayout(bottom_layout, stretch=1)
+
+        debug_group = QGroupBox("Serial Debugger")
+        debug_layout = QHBoxLayout()
+        self.debug_console = QTextEdit()
+        self.debug_console.setReadOnly(True)
+        self.debug_console.setMaximumHeight(150)
+        self.btn_clear_debug = QPushButton("Clear Debug Log")
+        self.btn_clear_debug.clicked.connect(self.debug_console.clear)
+        debug_layout.addWidget(self.debug_console, stretch=1)
+        debug_layout.addWidget(self.btn_clear_debug)
+        debug_group.setLayout(debug_layout)
+        main_layout.addWidget(debug_group)
         
         # Initialize UI state
         self.apply_control_mode("auto", notify_device=False)
@@ -366,11 +391,31 @@ class MainWindow(QMainWindow):
             self.btn_foil.setText(f"PDLC Foil: {'On' if checked else 'Off'}")
             self.worker.send_line(f"FOIL:{100 if checked else 0}\n")
 
+    def sync_settings(self):
+        mode_cmd = "MODE:AUTO\r\n" if self.control_mode == "auto" else "MODE:MANUAL\r\n"
+        target_cmd = f"T:{self.target_spinbox.value()}\r\n"
+        led_cmd = f"LED:{self.led_manual_slider.value()}\r\n"
+        foil_cmd = f"FOIL:{100 if self.btn_foil.isChecked() else 0}\r\n"
+
+        for cmd in (mode_cmd, target_cmd, led_cmd, foil_cmd):
+            self.worker.send_line(cmd)
+            time.sleep(0.05)
+
     # --- LOGGING ---
     def toggle_logging(self, checked):
         if checked:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"stm32_log_{timestamp}.csv"
+            default_dir = os.path.dirname(os.path.abspath(__file__))
+            default_path = os.path.join(default_dir, f"stm32_log_{timestamp}.csv")
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Live Recording CSV",
+                default_path,
+                "CSV Files (*.csv);;All Files (*)"
+            )
+            if not filename:
+                self.log_btn.setChecked(False)
+                return
             try:
                 self.csv_file = open(filename, 'w', newline='')
                 self.csv_writer = csv.writer(self.csv_file)
@@ -386,9 +431,43 @@ class MainWindow(QMainWindow):
             self.is_logging = False
             if self.csv_file:
                 self.csv_file.close()
+                self.csv_file = None
+                self.csv_writer = None
             self.log_btn.setText("Start Recording CSV")
             self.lbl_log_status.setText("Status: Not Recording")
             self.log_btn.setStyleSheet("")
+
+    def export_current_data(self):
+        if not self.time_data:
+            QMessageBox.information(self, "No Data", "There is no graph data to export.")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_dir = os.path.dirname(os.path.abspath(__file__))
+        default_path = os.path.join(default_dir, f"stm32_graph_export_{timestamp}.csv")
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Graph Data",
+            default_path,
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        try:
+            with open(filename, 'w', newline='') as export_file:
+                writer = csv.writer(export_file)
+                writer.writerow(['Time_s', 'Lux', 'Target', 'LED_Pct'])
+                for i in range(len(self.time_data)):
+                    writer.writerow([
+                        self.time_data[i],
+                        self.lux_data[i],
+                        self.target_data[i],
+                        self.led_data[i]
+                    ])
+            QMessageBox.information(self, "Export Complete", f"Graph data exported to:\n{filename}")
+        except Exception as e:
+            self.show_error(f"Failed to export graph data: {e}")
 
     # --- INCOMING DATA HANDLER ---
     def update_data(self, data):
@@ -429,6 +508,11 @@ class MainWindow(QMainWindow):
 
     def show_error(self, message):
         QMessageBox.warning(self, "Error", message)
+
+    def log_debug(self, msg):
+        self.debug_console.append(msg)
+        scrollbar = self.debug_console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def closeEvent(self, event):
         self.worker.disconnect_port()
