@@ -12,7 +12,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <math.h>
-#include <stdio.h> // Added for printf
+#include <stdio.h>
+#include <string.h> // Added for UART string parsing (strncmp)
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,6 +44,12 @@ UART_HandleTypeDef huart2;
 volatile uint8_t phase_degrees = 175; // Starts safely OFF
 volatile uint8_t missed_zc_count = 0; // Tracks how many times we predicted the wave
 
+// SHADOW VARIABLE FIX: Safely stores the timer delay until the zero-cross happens
+volatile uint32_t active_delay_us = 9500;
+
+// --- SYSTEM MODE ---
+volatile uint8_t system_mode = 1; // 1 = AUTO, 0 = MANUAL
+
 // --- OPEN-LOOP LOOKUP TABLE VARIABLES (AC DIMMER) ---
 volatile float target_rms_voltage = 12.0f;
 float last_target_rms = -1.0f;
@@ -67,11 +74,11 @@ float last_led_brightness = -1.0f;
 
 // --- MASTER PI CONTROLLER VARIABLES (FOIL + LED) ---
 volatile float target_lux = 700.0f;
-float Kp_master = 0.05f;  // Was 0.5f. Now reacts gently to sudden shadows.
-float Ki_master = 0.005f; // Was 0.1f. Now builds up very slowly over time.
+float Kp_master = 0.05f;  // Reacts gently to sudden shadows.
+float Ki_master = 0.005f; // Builds up very slowly over time.
 float master_integral = 0.0f;
 
-
+// --- UART RECEIVE VARIABLES ---
 uint8_t rx_byte;        // Holds the single incoming character
 char rx_buffer[20];     // Builds the full message string
 uint8_t rx_index = 0;   // Tracks our position in the buffer
@@ -96,10 +103,30 @@ int _write(int file, char *ptr, int len)
     return len;
 }
 
-// THE NEW SPLIT-RANGE PI CONTROLLER
-// THE NEW SPLIT-RANGE PI CONTROLLER (WITH FOIL LINEARIZATION)
+// ALLOWS MANUAL FOIL CONTROL USING YOUR MATLAB MAP
+void Set_Manual_Foil_Pct(float pct)
+{
+    if (pct > 100.0f) pct = 100.0f;
+    if (pct < 0.0f) pct = 0.0f;
+
+    int index = (int)(pct / 10.0f);
+
+    if (index >= 10) {
+        target_rms_voltage = PDLC_VOLTAGE_MAP[10];
+    } else {
+        float remainder = (pct - (index * 10.0f)) / 10.0f;
+        target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
+    }
+}
+
+// THE NEW SPLIT-RANGE PI CONTROLLER (WITH STATE MACHINE & FOIL LINEARIZATION)
 void Calculate_Master_PI_Controller(void)
 {
+    // If we are in manual mode, bypass the automatic control entirely!
+    if (system_mode == 0) {
+        return;
+    }
+
     float error = target_lux - current_lux;
     master_integral += error * Ki_master;
 
@@ -133,8 +160,6 @@ void Calculate_Master_PI_Controller(void)
     else
     {
         // STAGE 2 (100-200): Foil is locked at Max Transparency.
-        // NOTE: We cap the foil at 10.0V because your data shows 10V is fully clear!
-        // No need to pump 22.8V into it and waste power.
         target_rms_voltage = 10.0f;
 
         // Turn on the LEDs
@@ -157,34 +182,42 @@ void BH1750_Read_NonBlocking(void)
     if (current_tick - last_lux_read_tick >= 200)
     {
         last_lux_read_tick = current_tick;
-
         uint8_t data_buffer[2];
 
+        // 1. Try to read the sensor
         if (HAL_I2C_Master_Receive(&hi2c1, BH1750_ADDR, data_buffer, 2, 10) == HAL_OK)
         {
             uint16_t raw_light = (data_buffer[0] << 8) | data_buffer[1];
             float new_lux_reading = (float)raw_light / 1.2f;
 
-            // --- SOFTWARE LOW-PASS FILTER ---
-            // Blends 20% of the new reading with 80% of the old reading.
-            // This absorbs sudden spikes and makes the transition buttery smooth!
             if (current_lux == 0.0f) {
-                current_lux = new_lux_reading; // Initialize on first run
+                current_lux = new_lux_reading;
             } else {
                 current_lux = (current_lux * 0.8f) + (new_lux_reading * 0.2f);
             }
-
-            // Run the master controller using the smoothed data
-            Calculate_Master_PI_Controller();
-
-            // Print the live data in JSON format so the Python App can read it
-            printf("{\"lux\": %d, \"target\": %d, \"effort\": %d, \"foil_v\": %d, \"led_pct\": %d}\r\n",
-                  (int)current_lux,
-                  (int)target_lux,
-                  (int)master_integral,
-                  (int)(target_rms_voltage * 10.0f), // Multiplied by 10 so we don't lose the decimal (e.g. 4.2V prints as 42)
-                  (int)target_led_brightness);
         }
+        else
+        {
+            // SENSOR ERROR: Set to -1 so we can see the hardware failure on the UI!
+            current_lux = -1.0f;
+        }
+
+        // 2. ALWAYS run the controller and print JSON, even if sensor fails
+        Calculate_Master_PI_Controller();
+
+        int total_tenths = (int)roundf(target_rms_voltage * 10.0f);
+        int foil_whole = total_tenths / 10;
+        int foil_decimal = total_tenths % 10;
+
+        printf("{\"lux\": %d, \"target\": %d, \"effort\": %d, \"foil_v\": %d.%d, \"led_pct\": %d}\n",
+              (int)current_lux,
+              (int)target_lux,
+              (int)master_integral,
+              foil_whole, foil_decimal,
+              (int)target_led_brightness);
+
+        // Force the STM32 to flush the UART buffer immediately
+        fflush(stdout);
     }
 }
 
@@ -210,7 +243,7 @@ void Update_Angle_From_LUT(void)
         phase_degrees = LUT_ANGLES[0];
     }
     else if (target_rms_voltage <= LUT_VOLTAGES[LUT_SIZE - 1]) {
-    	phase_degrees = 180;
+        phase_degrees = 180;
     }
     else
     {
@@ -233,14 +266,15 @@ void Update_Angle_From_LUT(void)
     }
 
     // --- UPDATE THE METRONOME TRIPWIRE ---
+    // (50Hz Grid = 10,000us half-wave)
     uint32_t delay_us = ((uint32_t)phase_degrees * 10000) / 180;
     if(delay_us < 500) delay_us = 500;
     if(delay_us > 9500) delay_us = 9500;
 
-    // Safety Catch: If angle is >= 180, set the tripwire outside the 10,000 range so it never fires
     if(phase_degrees >= 180) { delay_us = 10001; }
 
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, delay_us);
+    // TIMING FIX: Save to shadow variable, do NOT update timer asynchronously!
+    active_delay_us = delay_us;
 }
 
 /* USER CODE END 0 */
@@ -531,6 +565,10 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     {
         // We got a real zero-cross! Sync the timer to reality.
         __HAL_TIM_SET_COUNTER(&htim3, 0);
+
+        // TIMING FIX: Update the compare register ONLY at zero-cross
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, active_delay_us);
+
         missed_zc_count = 0; // Reset our safety counter
     }
 }
@@ -563,16 +601,30 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
             for(int p = 0; p < 3; p++)
             {
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
-                for(volatile int i=0; i<500; i++);
+                // INTERRUPT FIX: Shrunk from 500 to 50 iterations so UART isn't choked
+                for(volatile int i=0; i<50; i++);
 
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_RESET);
-                for(volatile int i=0; i<500; i++);
+                for(volatile int i=0; i<50; i++);
             }
         }
     }
 }
 
-// --- NEW UART RECEIVE CALLBACK ---
+// ORE (OVERRUN ERROR) RECOVERY FIX:
+// Automatically restart the UART receiver if bytes crash into each other
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+    }
+}
+
+// --- FULL UART COMMAND PARSER ---
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART2)
@@ -582,19 +634,37 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         {
             rx_buffer[rx_index] = '\0'; // Cap off the end of the string
 
-            // Check if the message starts with "T:"
-            if (rx_buffer[0] == 'T' && rx_buffer[1] == ':')
-            {
+            // 1. AUTO MODE COMMAND
+            if (strncmp(rx_buffer, "MODE:AUTO", 9) == 0) {
+                system_mode = 1;
+            }
+            // 2. MANUAL MODE COMMAND
+            else if (strncmp(rx_buffer, "MODE:MANUAL", 11) == 0) {
+                system_mode = 0;
+            }
+            // 3. TARGET LUX COMMAND
+            else if (rx_buffer[0] == 'T' && rx_buffer[1] == ':') {
                 int new_target = 0;
-                // Extract the number after "T:"
                 sscanf((char*)&rx_buffer[2], "%d", &new_target);
-
-                // Safety check: Clamp to valid Lux bounds (0 to 2000)
-                if (new_target >= 0 && new_target <= 2000)
-                {
-                    target_lux = (float)new_target; // Update the Master Controller!
+                if (new_target >= 0 && new_target <= 2000) target_lux = (float)new_target;
+            }
+            // 4. MANUAL LED COMMAND
+            else if (strncmp(rx_buffer, "LED:", 4) == 0) {
+                if (system_mode == 0) {
+                    int led_val = 0;
+                    sscanf((char*)&rx_buffer[4], "%d", &led_val);
+                    if (led_val >= 0 && led_val <= 100) target_led_brightness = (float)led_val;
                 }
             }
+            // 5. MANUAL FOIL COMMAND
+            else if (strncmp(rx_buffer, "FOIL:", 5) == 0) {
+                if (system_mode == 0) {
+                    int foil_val = 0;
+                    sscanf((char*)&rx_buffer[5], "%d", &foil_val);
+                    if (foil_val >= 0 && foil_val <= 100) Set_Manual_Foil_Pct((float)foil_val);
+                }
+            }
+
             rx_index = 0; // Reset the buffer for the next message
         }
         else
@@ -603,6 +673,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             if (rx_index < 19)
             {
                 rx_buffer[rx_index++] = rx_byte;
+            }
+            else
+            {
+                // BUFFER LOCKOUT FIX: Clear the buffer safely if no \n was received
+                rx_index = 0;
+                memset(rx_buffer, 0, sizeof(rx_buffer));
             }
         }
 
