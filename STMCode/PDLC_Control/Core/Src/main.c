@@ -73,9 +73,10 @@ volatile float target_led_brightness = 0.0f;
 float last_led_brightness = -1.0f;
 
 // --- MASTER PI CONTROLLER VARIABLES (FOIL + LED) ---
-volatile float target_lux = 500.0f;
-float Kp_master = 0.05f;  // Reacts gently to sudden shadows.
-float Ki_master = 0.005f; // Builds up very slowly over time.
+volatile float target_lux = 1000.0f; // The exact value you want to achieve
+float led_spike_buffer = 150.0f;    // How many "extra" Lux to ignore to prevent LED oscillation
+float Kp_master = 0.05f;
+float Ki_master = 0.005f;
 float master_integral = 0.0f;
 
 // --- UART RECEIVE VARIABLES ---
@@ -119,17 +120,23 @@ void Set_Manual_Foil_Pct(float pct)
     }
 }
 
-// THE NEW SPLIT-RANGE PI CONTROLLER (WITH STATE MACHINE & FOIL LINEARIZATION)
+// THE NEW "CONDITIONAL DEADBAND" PI CONTROLLER
 void Calculate_Master_PI_Controller(void)
 {
-    // If we are in manual mode, bypass the automatic control entirely!
-    if (system_mode == 0) {
-        return;
-    }
+    if (system_mode == 0) return;
 
     float error = target_lux - current_lux;
-    master_integral += error * Ki_master;
 
+    // --------------------------------------------------------
+    // STRICT DEADBAND ONLY
+    // --------------------------------------------------------
+    // Both the Foil and the LED must now hit the target within +/- 5 Lux.
+    // WARNING: This will cause massive LED oscillation due to the physical 10% jump!
+    if (fabs(error) < 5.0f) {
+        error = 0.0f;
+    }
+
+    master_integral += error * Ki_master;
     if (master_integral > 200.0f) master_integral = 200.0f;
     if (master_integral < 0.0f) master_integral = 0.0f;
 
@@ -139,32 +146,22 @@ void Calculate_Master_PI_Controller(void)
     if (control_effort > 200.0f) control_effort = 200.0f;
     if (control_effort < 0.0f) control_effort = 0.0f;
 
-    // --------------------------------------------------------
-    // 5. SPLIT-RANGE ROUTING & LINEARIZATION
-    // --------------------------------------------------------
     if (control_effort <= 100.0f)
-        {
-            // STAGE 1 (0-100): Modulate the PDLC Foil using the exact MATLAB curve
-            int index = (int)(control_effort / 10.0f);
+    {
+        int index = (int)(control_effort / 10.0f);
 
-            if (index >= 10) {
-                target_rms_voltage = PDLC_VOLTAGE_MAP[10];
-            } else {
-                float remainder = (control_effort - (index * 10.0f)) / 10.0f;
-                target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
-            }
-
-            target_led_brightness = 0.0f; // LEDs strictly OFF
+        if (index >= 10) {
+            target_rms_voltage = PDLC_VOLTAGE_MAP[10];
+        } else {
+            float remainder = (control_effort - (index * 10.0f)) / 10.0f;
+            target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
         }
-        else
-        {
-            // STAGE 2 (100-200): Foil is locked at Max Transparency.
-            target_rms_voltage = 10.0f;
-
-            // --- NEW: LED LINEARIZATION ---
-            // We map the 100-200 effort range to the physical 10-100% LED range.
-            // This completely skips the dead 1-9% zone!
-            target_led_brightness = 10.0f + ((control_effort - 100.0f) * 0.9f);
+        target_led_brightness = 0.0f;
+    }
+    else
+    {
+        target_rms_voltage = 10.0f;
+        target_led_brightness = 10.0f + ((control_effort - 100.0f) * 0.9f);
     }
 }
 
@@ -211,11 +208,11 @@ void BH1750_Read_NonBlocking(void)
         int foil_decimal = total_tenths % 10;
 
         printf("{\"lux\": %d, \"target\": %d, \"effort\": %d, \"foil_v\": %d.%d, \"led_pct\": %d}\n",
-              (int)current_lux,
-              (int)target_lux,
-              (int)master_integral,
-              foil_whole, foil_decimal,
-              (int)target_led_brightness);
+                              (int)current_lux,
+                              (int)target_lux,
+                              (int)master_integral,
+                              foil_whole, foil_decimal,
+                              (int)target_led_brightness);
 
         // Force the STM32 to flush the UART buffer immediately
         fflush(stdout);
@@ -621,6 +618,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 }
 
 // --- FULL UART COMMAND PARSER ---
+// --- FULL UART COMMAND PARSER ---
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART2)
@@ -639,17 +637,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 system_mode = 0;
             }
             // 3. TARGET LUX COMMAND (Forgiving Parser)
-            else if (rx_buffer[0] == 'T' || rx_buffer[0] == 't') {
-                char *colon = strchr(rx_buffer, ':'); // Find where the colon is
-                if (colon != NULL) {
-                    int new_target = 0;
-                    sscanf(colon + 1, "%d", &new_target); // Read the number after the colon
+                        else if (rx_buffer[0] == 'T' || rx_buffer[0] == 't') {
+                            char *colon = strchr(rx_buffer, ':'); // Find where the colon is
+                            if (colon != NULL) {
+                                int new_target = 0;
+                                sscanf(colon + 1, "%d", &new_target); // Read the number after the colon
 
-                    if (new_target >= 0 && new_target <= 2000) {
-                        target_lux = (float)new_target;
-                    }
-                }
-            }
+                                if (new_target >= 0 && new_target <= 2000) {
+                                    target_lux = (float)new_target; // <--- FIXED THIS LINE
+                                }
+                            }
+                        }
             // 4. MANUAL LED COMMAND
             else if (strstr(rx_buffer, "LED") != NULL) {
                 if (system_mode == 0) {

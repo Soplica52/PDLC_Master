@@ -91,6 +91,8 @@ class MainWindow(QMainWindow):
         self.lux_data = deque(maxlen=self.buffer_size)
         self.target_data = deque(maxlen=self.buffer_size)
         self.led_data = deque(maxlen=self.buffer_size)
+        self.foil_data = deque(maxlen=self.buffer_size)
+        self.real_time_data = deque(maxlen=self.buffer_size)
         self.start_time = time.time()
 
         self.is_logging = False
@@ -302,6 +304,8 @@ class MainWindow(QMainWindow):
                     self.lux_data.clear()
                     self.target_data.clear()
                     self.led_data.clear()
+                    self.foil_data.clear()
+                    self.real_time_data.clear()
                     
                     self.apply_control_mode(self.control_mode)
                     
@@ -347,6 +351,8 @@ class MainWindow(QMainWindow):
         self.lux_data.clear()
         self.target_data.clear()
         self.led_data.clear()
+        self.foil_data.clear()
+        self.real_time_data.clear()
         self.curve_lux.setData([], [])
         self.curve_target.setData([], [])
         self.curve_led.setData([], [])
@@ -419,7 +425,7 @@ class MainWindow(QMainWindow):
             try:
                 self.csv_file = open(filename, 'w', newline='')
                 self.csv_writer = csv.writer(self.csv_file)
-                self.csv_writer.writerow(['Timestamp', 'Lux', 'Target', 'Effort', 'Foil_V', 'LED_Pct'])
+                self.csv_writer.writerow(['Real_Time', 'Time_Elapsed(s)', 'Lux', 'Target', 'Effort', 'Foil_V', 'LED_Pct'])
                 self.is_logging = True
                 self.log_btn.setText("Stop Recording")
                 self.lbl_log_status.setText(f"Recording to: {filename}")
@@ -457,13 +463,15 @@ class MainWindow(QMainWindow):
         try:
             with open(filename, 'w', newline='') as export_file:
                 writer = csv.writer(export_file)
-                writer.writerow(['Time_s', 'Lux', 'Target', 'LED_Pct'])
+                writer.writerow(['Real_Time', 'Time_Elapsed(s)', 'Lux', 'Target', 'LED_Pct', 'Foil_V'])
                 for i in range(len(self.time_data)):
                     writer.writerow([
-                        self.time_data[i],
+                        self.real_time_data[i],
+                        round(self.time_data[i], 3),
                         self.lux_data[i],
                         self.target_data[i],
-                        self.led_data[i]
+                        self.led_data[i],
+                        self.foil_data[i]
                     ])
             QMessageBox.information(self, "Export Complete", f"Graph data exported to:\n{filename}")
         except Exception as e:
@@ -484,10 +492,13 @@ class MainWindow(QMainWindow):
 
         # 2. Update Plot Buffers
         current_time = time.time() - self.start_time
+        real_time_str = datetime.now().strftime("%H:%M:%S")
+        self.real_time_data.append(real_time_str)
         self.time_data.append(current_time)
         self.lux_data.append(data.get('lux', 0))
         self.target_data.append(data.get('target', 0))
         self.led_data.append(data.get('led_pct', 0))
+        self.foil_data.append(data.get('foil_v', 0.0))
 
         # 3. Update Plot Lines
         self.curve_lux.setData(list(self.time_data), list(self.lux_data))
@@ -496,13 +507,13 @@ class MainWindow(QMainWindow):
 
         # 4. Log to CSV if active
         if self.is_logging and self.csv_writer:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             self.csv_writer.writerow([
-                ts, 
-                data.get('lux', 0), 
-                data.get('target', 0), 
-                data.get('effort', 0), 
-                data.get('foil_v', 0.0), 
+                real_time_str,
+                round(current_time, 3),
+                data.get('lux', 0),
+                data.get('target', 0),
+                data.get('effort', 0),
+                data.get('foil_v', 0.0),
                 data.get('led_pct', 0)
             ])
 
