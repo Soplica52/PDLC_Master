@@ -73,7 +73,7 @@ volatile float target_led_brightness = 0.0f;
 float last_led_brightness = -1.0f;
 
 // --- MASTER PI CONTROLLER VARIABLES (FOIL + LED) ---
-volatile float target_lux = 300.0f;
+volatile float target_lux = 500.0f;
 float Kp_master = 0.05f;  // Reacts gently to sudden shadows.
 float Ki_master = 0.005f; // Builds up very slowly over time.
 float master_integral = 0.0f;
@@ -143,27 +143,28 @@ void Calculate_Master_PI_Controller(void)
     // 5. SPLIT-RANGE ROUTING & LINEARIZATION
     // --------------------------------------------------------
     if (control_effort <= 100.0f)
-    {
-        // STAGE 1 (0-100): Modulate the PDLC Foil using the exact MATLAB curve
-        int index = (int)(control_effort / 10.0f);
+        {
+            // STAGE 1 (0-100): Modulate the PDLC Foil using the exact MATLAB curve
+            int index = (int)(control_effort / 10.0f);
 
-        if (index >= 10) {
-            target_rms_voltage = PDLC_VOLTAGE_MAP[10];
-        } else {
-            // Linear interpolation between the specific MATLAB data points
-            float remainder = (control_effort - (index * 10.0f)) / 10.0f;
-            target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
+            if (index >= 10) {
+                target_rms_voltage = PDLC_VOLTAGE_MAP[10];
+            } else {
+                float remainder = (control_effort - (index * 10.0f)) / 10.0f;
+                target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
+            }
+
+            target_led_brightness = 0.0f; // LEDs strictly OFF
         }
+        else
+        {
+            // STAGE 2 (100-200): Foil is locked at Max Transparency.
+            target_rms_voltage = 10.0f;
 
-        target_led_brightness = 0.0f; // LEDs off
-    }
-    else
-    {
-        // STAGE 2 (100-200): Foil is locked at Max Transparency.
-        target_rms_voltage = 10.0f;
-
-        // Turn on the LEDs
-        target_led_brightness = (control_effort - 100.0f);
+            // --- NEW: LED LINEARIZATION ---
+            // We map the 100-200 effort range to the physical 10-100% LED range.
+            // This completely skips the dead 1-9% zone!
+            target_led_brightness = 10.0f + ((control_effort - 100.0f) * 0.9f);
     }
 }
 
@@ -223,16 +224,11 @@ void BH1750_Read_NonBlocking(void)
 
 void Update_LED_Brightness(void)
 {
+    // Simple safety bounds
     if (target_led_brightness > 100.0f) target_led_brightness = 100.0f;
+    if (target_led_brightness < 0.0f) target_led_brightness = 0.0f;
 
-    // DEAD ZONE FILTER (The 10% rule)
-    if (target_led_brightness < 10.0f && target_led_brightness > 0.5f) {
-        target_led_brightness = 10.0f;
-    }
-    else if (target_led_brightness <= 0.5f) {
-        target_led_brightness = 0.0f;
-    }
-
+    // Convert percentage to 0-1000 Timer format
     uint32_t pwm_register_value = (uint32_t)(target_led_brightness * 10.0f);
     __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pwm_register_value);
 }
@@ -635,33 +631,45 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             rx_buffer[rx_index] = '\0'; // Cap off the end of the string
 
             // 1. AUTO MODE COMMAND
-            if (strncmp(rx_buffer, "MODE:AUTO", 9) == 0) {
+            if (strstr(rx_buffer, "AUTO") != NULL) {
                 system_mode = 1;
             }
             // 2. MANUAL MODE COMMAND
-            else if (strncmp(rx_buffer, "MODE:MANUAL", 11) == 0) {
+            else if (strstr(rx_buffer, "MANUAL") != NULL) {
                 system_mode = 0;
             }
-            // 3. TARGET LUX COMMAND
-            else if (rx_buffer[0] == 'T' && rx_buffer[1] == ':') {
-                int new_target = 0;
-                sscanf((char*)&rx_buffer[2], "%d", &new_target);
-                if (new_target >= 0 && new_target <= 2000) target_lux = (float)new_target;
+            // 3. TARGET LUX COMMAND (Forgiving Parser)
+            else if (rx_buffer[0] == 'T' || rx_buffer[0] == 't') {
+                char *colon = strchr(rx_buffer, ':'); // Find where the colon is
+                if (colon != NULL) {
+                    int new_target = 0;
+                    sscanf(colon + 1, "%d", &new_target); // Read the number after the colon
+
+                    if (new_target >= 0 && new_target <= 2000) {
+                        target_lux = (float)new_target;
+                    }
+                }
             }
             // 4. MANUAL LED COMMAND
-            else if (strncmp(rx_buffer, "LED:", 4) == 0) {
+            else if (strstr(rx_buffer, "LED") != NULL) {
                 if (system_mode == 0) {
-                    int led_val = 0;
-                    sscanf((char*)&rx_buffer[4], "%d", &led_val);
-                    if (led_val >= 0 && led_val <= 100) target_led_brightness = (float)led_val;
+                    char *colon = strchr(rx_buffer, ':');
+                    if (colon != NULL) {
+                        int led_val = 0;
+                        sscanf(colon + 1, "%d", &led_val);
+                        if (led_val >= 0 && led_val <= 100) target_led_brightness = (float)led_val;
+                    }
                 }
             }
             // 5. MANUAL FOIL COMMAND
-            else if (strncmp(rx_buffer, "FOIL:", 5) == 0) {
+            else if (strstr(rx_buffer, "FOIL") != NULL) {
                 if (system_mode == 0) {
-                    int foil_val = 0;
-                    sscanf((char*)&rx_buffer[5], "%d", &foil_val);
-                    if (foil_val >= 0 && foil_val <= 100) Set_Manual_Foil_Pct((float)foil_val);
+                    char *colon = strchr(rx_buffer, ':');
+                    if (colon != NULL) {
+                        int foil_val = 0;
+                        sscanf(colon + 1, "%d", &foil_val);
+                        if (foil_val >= 0 && foil_val <= 100) Set_Manual_Foil_Pct((float)foil_val);
+                    }
                 }
             }
 
@@ -686,6 +694,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
     }
 }
+
 /* USER CODE END 4 */
 
 /**
