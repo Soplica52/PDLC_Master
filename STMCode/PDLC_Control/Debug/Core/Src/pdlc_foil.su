@@ -1,0 +1,2 @@
+../Core/Src/pdlc_foil.c:30:6:Set_Manual_Foil_Pct	32	static
+../Core/Src/pdlc_foil.c:45:6:Update_Angle_From_LUT	48	static

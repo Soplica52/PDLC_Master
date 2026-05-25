@@ -14,6 +14,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h> // Added for UART string parsing (strncmp)
+#include "sensor.h"
+#include "pdlc_foil.h"
+#include "control_algos.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -23,8 +26,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define LUT_SIZE 11
-#define BH1750_ADDR 0x46
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -41,43 +43,13 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-volatile uint8_t phase_degrees = 175; // Starts safely OFF
-volatile uint8_t missed_zc_count = 0; // Tracks how many times we predicted the wave
-
-// SHADOW VARIABLE FIX: Safely stores the timer delay until the zero-cross happens
-volatile uint32_t active_delay_us = 9500;
-
-// --- SYSTEM MODE ---
-volatile uint8_t system_mode = 1; // 1 = AUTO, 0 = MANUAL
 
 // --- OPEN-LOOP LOOKUP TABLE VARIABLES (AC DIMMER) ---
-volatile float target_rms_voltage = 12.0f;
 float last_target_rms = -1.0f;
 
-const uint8_t LUT_ANGLES[LUT_SIZE] = {5, 45, 90, 120, 135, 145, 155, 160, 165, 170, 175};
-const float LUT_VOLTAGES[LUT_SIZE] = {
-    22.8f, 20.0f, 17.0f, 11.3f, 7.68f, 5.5f, 3.5f, 2.7f, 1.9f, 1.25f, 1.0f
-};
-
-// --- PDLC FOIL LINEARIZATION MAP ---
-// Maps 0-100% Control Effort to the exact voltage needed for a linear visual transition.
-// Derived from MATLAB data: 0%, 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90%, 100% clear
-const float PDLC_VOLTAGE_MAP[11] = {0.0f, 2.4f, 3.1f, 3.5f, 3.9f, 4.2f, 4.6f, 5.0f, 5.4f, 6.5f, 10.0f};
-
-// --- AMBIENT LIGHT SENSOR (BH1750) VARIABLES ---
-volatile float current_lux = 0.0f;
-uint32_t last_lux_read_tick = 0;
-
 // --- LED STRIP (0-10V PWM) VARIABLES ---
-volatile float target_led_brightness = 0.0f;
 float last_led_brightness = -1.0f;
 
-// --- MASTER PI CONTROLLER VARIABLES (FOIL + LED) ---
-volatile float target_lux = 1000.0f; // The exact value you want to achieve
-float led_spike_buffer = 150.0f;    // How many "extra" Lux to ignore to prevent LED oscillation
-float Kp_master = 0.05f;
-float Ki_master = 0.005f;
-float master_integral = 0.0f;
 
 // --- UART RECEIVE VARIABLES ---
 uint8_t rx_byte;        // Holds the single incoming character
@@ -104,172 +76,6 @@ int _write(int file, char *ptr, int len)
     return len;
 }
 
-// ALLOWS MANUAL FOIL CONTROL USING YOUR MATLAB MAP
-void Set_Manual_Foil_Pct(float pct)
-{
-    if (pct > 100.0f) pct = 100.0f;
-    if (pct < 0.0f) pct = 0.0f;
-
-    int index = (int)(pct / 10.0f);
-
-    if (index >= 10) {
-        target_rms_voltage = PDLC_VOLTAGE_MAP[10];
-    } else {
-        float remainder = (pct - (index * 10.0f)) / 10.0f;
-        target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
-    }
-}
-
-// THE NEW "CONDITIONAL DEADBAND" PI CONTROLLER
-void Calculate_Master_PI_Controller(void)
-{
-    if (system_mode == 0) return;
-
-    float error = target_lux - current_lux;
-
-    // --------------------------------------------------------
-    // STRICT DEADBAND ONLY
-    // --------------------------------------------------------
-    // Both the Foil and the LED must now hit the target within +/- 5 Lux.
-    // WARNING: This will cause massive LED oscillation due to the physical 10% jump!
-    if (fabs(error) < 5.0f) {
-        error = 0.0f;
-    }
-
-    master_integral += error * Ki_master;
-    if (master_integral > 200.0f) master_integral = 200.0f;
-    if (master_integral < 0.0f) master_integral = 0.0f;
-
-    float P = error * Kp_master;
-    float control_effort = P + master_integral;
-
-    if (control_effort > 200.0f) control_effort = 200.0f;
-    if (control_effort < 0.0f) control_effort = 0.0f;
-
-    if (control_effort <= 100.0f)
-    {
-        int index = (int)(control_effort / 10.0f);
-
-        if (index >= 10) {
-            target_rms_voltage = PDLC_VOLTAGE_MAP[10];
-        } else {
-            float remainder = (control_effort - (index * 10.0f)) / 10.0f;
-            target_rms_voltage = PDLC_VOLTAGE_MAP[index] + remainder * (PDLC_VOLTAGE_MAP[index+1] - PDLC_VOLTAGE_MAP[index]);
-        }
-        target_led_brightness = 0.0f;
-    }
-    else
-    {
-        target_rms_voltage = 10.0f;
-        target_led_brightness = 10.0f + ((control_effort - 100.0f) * 0.9f);
-    }
-}
-
-void BH1750_Init(void)
-{
-    // Command 0x10 = Continuously H-Resolution Mode
-    // Resolution: 1 lux. Measurement time: ~120ms.
-    uint8_t init_cmd = 0x10;
-    HAL_I2C_Master_Transmit(&hi2c1, BH1750_ADDR, &init_cmd, 1, 100);
-}
-
-void BH1750_Read_NonBlocking(void)
-{
-    uint32_t current_tick = HAL_GetTick();
-
-    if (current_tick - last_lux_read_tick >= 200)
-    {
-        last_lux_read_tick = current_tick;
-        uint8_t data_buffer[2];
-
-        // 1. Try to read the sensor
-        if (HAL_I2C_Master_Receive(&hi2c1, BH1750_ADDR, data_buffer, 2, 10) == HAL_OK)
-        {
-            uint16_t raw_light = (data_buffer[0] << 8) | data_buffer[1];
-            float new_lux_reading = (float)raw_light / 1.2f;
-
-            if (current_lux == 0.0f) {
-                current_lux = new_lux_reading;
-            } else {
-                current_lux = (current_lux * 0.8f) + (new_lux_reading * 0.2f);
-            }
-        }
-        else
-        {
-            // SENSOR ERROR: Set to -1 so we can see the hardware failure on the UI!
-            current_lux = -1.0f;
-        }
-
-        // 2. ALWAYS run the controller and print JSON, even if sensor fails
-        Calculate_Master_PI_Controller();
-
-        int total_tenths = (int)roundf(target_rms_voltage * 10.0f);
-        int foil_whole = total_tenths / 10;
-        int foil_decimal = total_tenths % 10;
-
-        printf("{\"lux\": %d, \"target\": %d, \"effort\": %d, \"foil_v\": %d.%d, \"led_pct\": %d}\n",
-                              (int)current_lux,
-                              (int)target_lux,
-                              (int)master_integral,
-                              foil_whole, foil_decimal,
-                              (int)target_led_brightness);
-
-        // Force the STM32 to flush the UART buffer immediately
-        fflush(stdout);
-    }
-}
-
-void Update_LED_Brightness(void)
-{
-    // Simple safety bounds
-    if (target_led_brightness > 100.0f) target_led_brightness = 100.0f;
-    if (target_led_brightness < 0.0f) target_led_brightness = 0.0f;
-
-    // Convert percentage to 0-1000 Timer format
-    uint32_t pwm_register_value = (uint32_t)(target_led_brightness * 10.0f);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pwm_register_value);
-}
-
-void Update_Angle_From_LUT(void)
-{
-    if (target_rms_voltage >= LUT_VOLTAGES[0]) {
-        phase_degrees = LUT_ANGLES[0];
-    }
-    else if (target_rms_voltage <= LUT_VOLTAGES[LUT_SIZE - 1]) {
-        phase_degrees = 180;
-    }
-    else
-    {
-        for (int i = 0; i < LUT_SIZE - 1; i++)
-        {
-            if (target_rms_voltage <= LUT_VOLTAGES[i] && target_rms_voltage >= LUT_VOLTAGES[i+1])
-            {
-                float v_high = LUT_VOLTAGES[i];
-                float v_low = LUT_VOLTAGES[i+1];
-                float a_low_val = (float)LUT_ANGLES[i];
-                float a_high_val = (float)LUT_ANGLES[i+1];
-
-                float ratio = (v_high - target_rms_voltage) / (v_high - v_low);
-                float calculated_angle = a_low_val + (ratio * (a_high_val - a_low_val));
-
-                phase_degrees = (uint8_t)calculated_angle;
-                break; // Exit loop once found
-            }
-        }
-    }
-
-    // --- UPDATE THE METRONOME TRIPWIRE ---
-    // (50Hz Grid = 10,000us half-wave)
-    uint32_t delay_us = ((uint32_t)phase_degrees * 10000) / 180;
-    if(delay_us < 500) delay_us = 500;
-    if(delay_us > 9500) delay_us = 9500;
-
-    if(phase_degrees >= 180) { delay_us = 10001; }
-
-    // TIMING FIX: Save to shadow variable, do NOT update timer asynchronously!
-    active_delay_us = delay_us;
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -294,7 +100,7 @@ int main(void)
   HAL_TIM_OC_Start_IT(&htim3, TIM_CHANNEL_1);
 
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-  BH1750_Init();
+  BH1750_Init(&hi2c1);
 
   HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
   /* USER CODE END 2 */
@@ -316,7 +122,7 @@ int main(void)
       }
 
       // Check the sensor (and run the master controller) every 200ms
-      BH1750_Read_NonBlocking();
+      BH1750_Read_NonBlocking(&hi2c1);
 
     /* USER CODE END WHILE */
   }
