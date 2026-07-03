@@ -43,18 +43,31 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+/* USER CODE BEGIN PV */
 
-// --- OPEN-LOOP LOOKUP TABLE VARIABLES (AC DIMMER) ---
+// --- BRIDGE TO EXTERNAL MODULES ---
+// These tell main.c: "Don't panic! These variables exist in the other .c files!"
+extern volatile uint32_t active_delay_us;
+extern volatile uint8_t missed_zc_count;
+extern volatile uint8_t phase_degrees;
+
+extern volatile float target_rms_voltage;
+extern volatile float target_led_brightness;
+extern volatile float target_lux;
+extern volatile uint8_t system_mode;
+
+// --- LOCAL VARIABLES ---
 float last_target_rms = -1.0f;
-
-// --- LED STRIP (0-10V PWM) VARIABLES ---
 float last_led_brightness = -1.0f;
 
+extern float master_integral;
 
 // --- UART RECEIVE VARIABLES ---
 uint8_t rx_byte;        // Holds the single incoming character
 char rx_buffer[20];     // Builds the full message string
 uint8_t rx_index = 0;   // Tracks our position in the buffer
+
+/* USER CODE END PV */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -121,11 +134,30 @@ int main(void)
           last_led_brightness = target_led_brightness;
       }
 
-      // Check the sensor (and run the master controller) every 200ms
-      BH1750_Read_NonBlocking(&hi2c1);
+      if (BH1750_Read_NonBlocking(&hi2c1) == 1)
+            {
+                // A. RUN THE BRAIN
+                Calculate_Master_PI_Controller();
+
+                // B. PREPARE THE DECIMAL FOR PRINTING
+                int total_tenths = (int)roundf(target_rms_voltage * 10.0f);
+                int foil_whole = total_tenths / 10;
+                int foil_decimal = total_tenths % 10;
+
+                // C. TALK TO THE PYTHON APP
+                printf("{\"lux\": %d, \"target\": %d, \"effort\": %d, \"foil_v\": %d.%d, \"led_pct\": %d}\n",
+                      (int)current_lux,
+                      (int)target_lux,
+                      (int)master_integral,
+                      foil_whole, foil_decimal,
+                      (int)target_led_brightness);
+
+                // Force the STM32 to flush the UART buffer immediately
+                fflush(stdout);
 
     /* USER CODE END WHILE */
   }
+}
 }
 
 /**
@@ -384,7 +416,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         // the AC grid power might actually be off.
         if(missed_zc_count > 3)
         {
-            missed_zc_count = 4; // Prevent variable overflow
+        	NVIC_SystemReset(); // Force a system reboot
         }
     }
 }

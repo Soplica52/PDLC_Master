@@ -7,6 +7,7 @@
 #include "control_algos.h"
 #include "sensor.h"       // Gives access to current_lux
 #include "pdlc_foil.h"    // Gives access to target_rms_voltage & PDLC map
+#include "main.h"
 #include <math.h>         // Gives access to fabs()
 
 // Give this file access to htim2 from main.c so we don't have to change your function signature!
@@ -19,13 +20,17 @@ volatile uint8_t system_mode = 1; // 1 = AUTO, 0 = MANUAL
 volatile float target_led_brightness = 0.0f;
 
 // --- MASTER PI CONTROLLER VARIABLES (FOIL + LED) ---
-volatile float target_lux = 1000.0f; // The exact value you want to achieve
+volatile float target_lux = 500.0f; // The exact value you want to achieve
 float led_spike_buffer = 150.0f;    // How many "extra" Lux to ignore to prevent LED oscillation
 float Kp_master = 0.05f;
 float Ki_master = 0.005f;
 float master_integral = 0.0f;
 
-// THE NEW "CONDITIONAL DEADBAND" PI CONTROLLER
+// --- NEW: DWELL TIME VARIABLES ---
+uint32_t last_switch_tick = 0;
+uint8_t led_was_on = 0;
+uint32_t switch_delay_ms = 10000; // 10 SECONDS (Adjust this to whatever you want!)
+
 void Calculate_Master_PI_Controller(void)
 {
     if (system_mode == 0) return;
@@ -33,14 +38,53 @@ void Calculate_Master_PI_Controller(void)
     float error = target_lux - current_lux;
 
     // --------------------------------------------------------
-    // STRICT DEADBAND ONLY
+    // 1. THE DWELL TIME TRACKER
     // --------------------------------------------------------
-    // Both the Foil and the LED must now hit the target within +/- 5 Lux.
-    // WARNING: This will cause massive LED oscillation due to the physical 10% jump!
-    if (fabs(error) < 5.0f) {
-        error = 0.0f;
+    // Check if the LED just turned on, or just turned off.
+    uint8_t led_is_on = (target_led_brightness > 0.0f) ? 1 : 0;
+    if (led_is_on != led_was_on)
+    {
+        last_switch_tick = HAL_GetTick(); // Record the exact millisecond it switched
+        led_was_on = led_is_on;
     }
 
+    // Check if we are still inside the 10-second "Lockout" window
+    uint8_t lockout_active = (HAL_GetTick() - last_switch_tick < switch_delay_ms) ? 1 : 0;
+
+    // --------------------------------------------------------
+    // 2. THE "HANDOVER" HYSTERESIS (Lux Lock + Time Lock)
+    // --------------------------------------------------------
+    if (master_integral >= 95.0f || target_led_brightness > 0.0f)
+        {
+            if (target_led_brightness == 0.0f)
+            {
+                // CONDITION 1: Foil is maxed, trying to turn LEDs ON.
+                // YES! The 150 Lux boundary is still right here.
+                if ((error > 0.0f && error <= 150.0f) || (lockout_active == 1 && error > 0.0f)) {
+                    error = 0.0f; // Freeze.
+                }
+            }
+            else if (target_led_brightness > 0.0f && target_led_brightness <= 25.0f)
+            {
+                // CONDITION 2: LEDs are ON, trying to shut them OFF.
+                // WIDENED NET (25%): Catches the P-term punch.
+                // YES! The -150 Lux boundary is still right here.
+                if ((error < 0.0f && error >= -150.0f) || (lockout_active == 1 && error < 0.0f)) {
+                    error = 0.0f; // Freeze.
+                }
+            }
+        }
+        else
+        {
+            // Foil Modulation Zone
+            if (fabs(error) < 5.0f) {
+                error = 0.0f;
+            }
+        }
+
+    // --------------------------------------------------------
+    // 3. MATH & ROUTING
+    // --------------------------------------------------------
     master_integral += error * Ki_master;
     if (master_integral > 200.0f) master_integral = 200.0f;
     if (master_integral < 0.0f) master_integral = 0.0f;
@@ -54,7 +98,6 @@ void Calculate_Master_PI_Controller(void)
     if (control_effort <= 100.0f)
     {
         int index = (int)(control_effort / 10.0f);
-
         if (index >= 10) {
             target_rms_voltage = PDLC_VOLTAGE_MAP[10];
         } else {

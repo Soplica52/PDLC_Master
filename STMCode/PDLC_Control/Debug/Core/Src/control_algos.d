@@ -33,7 +33,7 @@ Core/Src/control_algos.o: ../Core/Src/control_algos.c \
  ../Drivers/STM32G0xx_HAL_Driver/Inc/stm32g0xx_hal_tim_ex.h \
  ../Drivers/STM32G0xx_HAL_Driver/Inc/stm32g0xx_hal_uart.h \
  ../Drivers/STM32G0xx_HAL_Driver/Inc/stm32g0xx_hal_uart_ex.h \
- ../Core/Inc/sensor.h ../Core/Inc/pdlc_foil.h
+ ../Core/Inc/sensor.h ../Core/Inc/pdlc_foil.h ../Core/Inc/main.h
 ../Core/Inc/control_algos.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32G0xx_HAL_Driver/Inc/stm32g0xx_hal.h:
@@ -71,3 +71,4 @@ Core/Src/control_algos.o: ../Core/Src/control_algos.c \
 ../Drivers/STM32G0xx_HAL_Driver/Inc/stm32g0xx_hal_uart_ex.h:
 ../Core/Inc/sensor.h:
 ../Core/Inc/pdlc_foil.h:
+../Core/Inc/main.h:
