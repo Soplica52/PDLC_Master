@@ -87,7 +87,7 @@ for i = 1:length(files)
     legend('Actual Lux (Sensor)', 'Target Lux', 'Location', 'best');
     grid on;
     
-    % -- Bottom Plot: Hardware Actuation --
+% -- Bottom Plot: Hardware Actuation --
     ax2 = subplot(2, 1, 2);
     
     yyaxis left;
@@ -96,14 +96,23 @@ for i = 1:length(files)
     ylim([0 210]);
     
     yyaxis right;
-    plot(time_mins, data.Foil_V, 'm', 'LineWidth', 1.5); hold on;
-    plot(time_mins, data.LED_Pct, 'r', 'LineWidth', 1.5);
-    ylabel('Hardware Outputs (V or %)');
+    if i == 3
+        foil_scaled = data.Foil_V * 10; % Rescale 0-10V to 0-100% for visual comparison
+        plot(time_mins, foil_scaled, 'm', 'LineWidth', 1.5); hold on;
+        plot(time_mins, data.LED_Pct, 'r', 'LineWidth', 1.5);
+        ylabel('Hardware Outputs (%)');
+        legend_foil_label = 'PDLC Foil (%)';
+    else
+        plot(time_mins, data.Foil_V, 'm', 'LineWidth', 1.5); hold on;
+        plot(time_mins, data.LED_Pct, 'r', 'LineWidth', 1.5);
+        ylabel('Hardware Outputs (V or %)');
+        legend_foil_label = 'PDLC Foil (V)';
+    end
     ylim([0 110]);
     
     title('Actuator Response (Effort vs Hardware)');
     xlabel('Elapsed Time (Minutes)');
-    legend('PI Effort', 'PDLC Foil (V)', 'LED Output (%)', 'Location', 'best');
+    legend('PI Effort', legend_foil_label, 'LED Output (%)', 'Location', 'best');
     grid on;
     
     % Link X-axes for zooming
