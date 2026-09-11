@@ -8,10 +8,8 @@ clear; clc; close all;
 % -------------------------------------------------------------------------
 files = {
     'stm32_log_20260522_124508.csv', % File 1
-
-'stm32_log_20260522_144739.csv', % File 2
-
-'stm32_log_20260522_154040.csv' % File 3
+    'stm32_log_20260522_144739.csv', % File 2
+    'stm32_log_20260522_154040.csv'  % File 3
 };
 
 fprintf('==================================================\n');
@@ -83,16 +81,17 @@ for i = 1:length(files)
     plot(time_mins, target, 'Color', '#0072BD', 'LineStyle', '--', 'LineWidth', 2);
     
     title(sprintf('Run %d: PI Controller Tracking Performance', i));
-    ylabel('Illuminance (Lux)');
-    legend('Actual Lux (Sensor)', 'Target Lux', 'Location', 'best');
+    ylabel('Illuminance (lx)');
+    xlabel('Elapsed Time (Minutes)'); % <--- ADDED: X-axis label for the top graph
+    legend('Actual lx (Sensor)', 'Target lx', 'Location', 'best');
     grid on;
     
-% -- Bottom Plot: Hardware Actuation --
+    % -- Bottom Plot: Hardware Actuation --
     ax2 = subplot(2, 1, 2);
     
     yyaxis left;
     plot(time_mins, data.Effort, 'k', 'LineWidth', 1.5);
-    ylabel('Master Effort (0-200)');
+    ylabel('Master PI Effort (0-200 %)');
     ylim([0 210]);
     
     yyaxis right;
@@ -100,19 +99,19 @@ for i = 1:length(files)
         foil_scaled = data.Foil_V * 10; % Rescale 0-10V to 0-100% for visual comparison
         plot(time_mins, foil_scaled, 'm', 'LineWidth', 1.5); hold on;
         plot(time_mins, data.LED_Pct, 'r', 'LineWidth', 1.5);
-        ylabel('Hardware Outputs (%)');
+        ylabel('Actuator Effort (%)');
         legend_foil_label = 'PDLC Foil (%)';
     else
         plot(time_mins, data.Foil_V, 'm', 'LineWidth', 1.5); hold on;
         plot(time_mins, data.LED_Pct, 'r', 'LineWidth', 1.5);
-        ylabel('Hardware Outputs (V or %)');
-        legend_foil_label = 'PDLC Foil (V)';
+        ylabel('Actuator Effort (%)');
+        legend_foil_label = 'PDLC Foil (%)';
     end
     ylim([0 110]);
     
     title('Actuator Response (Effort vs Hardware)');
     xlabel('Elapsed Time (Minutes)');
-    legend('PI Effort', legend_foil_label, 'LED Output (%)', 'Location', 'best');
+    legend('PI Effort (%)', legend_foil_label, 'LED Output (%)', 'Location', 'best');
     grid on;
     
     % Link X-axes for zooming

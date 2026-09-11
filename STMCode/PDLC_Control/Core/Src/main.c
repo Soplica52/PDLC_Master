@@ -394,13 +394,23 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
     if(GPIO_Pin == Zero_Cross_Detector_Pin)
     {
-        // We got a real zero-cross! Sync the timer to reality.
-        __HAL_TIM_SET_COUNTER(&htim3, 0);
+        // 1. SOFTWARE FILTER: Check time since last trigger
+        static uint32_t last_zcd_time = 0;
+        uint32_t current_time = HAL_GetTick();
 
-        // TIMING FIX: Update the compare register ONLY at zero-cross
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, active_delay_us);
+        // Safe debounce: 3ms ignores noise but leaves a wide window for the 10ms true pulse
+        if ((current_time - last_zcd_time) >= 3)
+        {
+            last_zcd_time = current_time; // Update the timestamp
 
-        missed_zc_count = 0; // Reset our safety counter
+            // 2. We got a real, filtered zero-cross! Sync the timer to reality.
+            __HAL_TIM_SET_COUNTER(&htim3, 0);
+
+            // TIMING FIX: Update the compare register ONLY at zero-cross
+            __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, active_delay_us);
+
+            missed_zc_count = 0; // Reset our safety counter
+        }
     }
 }
 

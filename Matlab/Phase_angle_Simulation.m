@@ -89,14 +89,14 @@ subplot(3,1,1);
 plot(t, v_ac, 'Color', [0.7 0.7 0.7], 'DisplayName', 'Mains (24V AC)'); hold on;
 plot(t, v_load, 'b', 'LineWidth', 1.5, 'DisplayName', 'Load Voltage');
 title(sprintf('Output Waveform (\\alpha = %d^\\circ) | Simulated RMS = %.2f V', Alpha_deg, V_load_rms_sim));
-ylabel('Voltage [V]'); grid on; legend('Location','best');
+ylabel('Voltage [V]'); xlabel('Time [s]'); grid on; legend('Location','best');
 ylim([-40 40]);
 
 % Subplot 2: Zero Crossing Signal
 subplot(3,1,2);
 plot(t, zcd_signal, 'k', 'LineWidth', 1.5);
 title('Zero Crossing Signal (Pin: ZERO\_CROSS)');
-ylabel('Logic'); grid on; ylim([-0.2 1.2]);
+ylabel('Logic'); xlabel('Time [s]'); grid on; ylim([-0.2 1.2]);
 
 % Subplot 3: Control/Gate Pulses
 subplot(3,1,3);
